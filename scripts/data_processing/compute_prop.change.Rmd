@@ -1,0 +1,148 @@
+---
+title: "Compute % change by assemblage id, species, and year"
+Authors: "AF"
+---
+
+
+```{r}
+library(dplyr)
+library(sf)
+library(ggplot2)
+
+database_assemblages <- readRDS(here::here("../database_assemblages.rds"))
+metadata <- read.csv(here::here('raw_data/BioTIMEMetadata_24_06_2021.csv'))
+```
+
+
+
+# By COUNTRY + BIOME
+
+
+# At the genus level
+
+```{r}
+#database_assemblages <- readRDS(here::here("../database_assemblages_biomes.rds"))
+data_with_biome <- readRDS(here::here("output/temporary_output/data_with_biomes.rds"))
+
+terrestrial_data_biome <- data_with_biome %>%
+  filter(REALM == "Terrestrial")
+
+metadata <- read.csv(here::here('raw_data/BioTIMEMetadata_24_06_2021.csv'))
+
+marine_data_with_ecoregions <- readRDS(here::here("output/temporary_output/marine_data_with_ecoregions.rds"))
+
+marine_data_with_ecoregions <- marine_data_with_ecoregions %>%
+  mutate(REALM = "Marine")
+```
+
+
+
+
+```{r}
+# Define a function to process % change based on the specified grouping variables
+process_realm_data <- function(data, realm_type) {
+  
+  # Filter data for the specified realm
+  data <- data %>%
+    filter(REALM == realm_type)
+  
+  # Replace 0s with NAs if the study didn't record how abundance or biomass was measured
+  data$sum.allrawdata.ABUNDANCE[which(
+    data$STUDY_ID %in% metadata$STUDY_ID[which(is.na(metadata$ABUNDANCE_TYPE))])] <- NA
+  
+  data$sum.allrawdata.BIOMASS[which(
+    data$STUDY_ID %in% metadata$STUDY_ID[which(is.na(metadata$BIOMASS_TYPE))])] <- NA
+  
+  # Replace NAs in `PLOT` with a placeholder
+  data$PLOT[is.na(data$PLOT)] <- "Was_NA"
+  
+  # Define grouping based on realm type
+  if (realm_type == "Terrestrial") {
+    data$UNIQUE_ID <- paste(data$country, data$BIOME_NAME, data$GENUS, data$YEAR, sep = "~")
+  } else if (realm_type == "Marine") {
+    data$UNIQUE_ID <- paste(data$marine_ecoregion, data$GENUS, data$YEAR, sep = "~")
+  }
+  
+  # Aggregate abundance and biomass data by the unique ID
+  agg_data <- aggregate(cbind(sum.allrawdata.ABUNDANCE, sum.allrawdata.BIOMASS) ~ UNIQUE_ID, 
+                        data = data, 
+                        FUN = function(x) if (all(is.na(x))) NA else mean(x, na.rm = TRUE))
+  
+  # Extract and add back the necessary columns from UNIQUE_ID
+  if (realm_type == "Terrestrial") {
+    agg_data <- agg_data %>%
+      mutate(
+        country = sub("~.*", "", UNIQUE_ID),
+        BIOME_NAME = sub(".*~(.*)~.*~.*", "\\1", UNIQUE_ID),
+        GENUS = sub(".*~.*~(.*)~.*", "\\1", UNIQUE_ID),
+        YEAR = as.integer(sub(".*~", "", UNIQUE_ID)),
+        REALM = realm_type
+      )
+  } else if (realm_type == "Marine") {
+    agg_data <- agg_data %>%
+      mutate(
+        marine_ecoregion = sub("~.*", "", UNIQUE_ID),
+        GENUS = sub(".*~(.*)~.*", "\\1", UNIQUE_ID),
+        YEAR = as.integer(sub(".*~", "", UNIQUE_ID)),
+        REALM = realm_type
+      )
+  }
+  
+  # Calculate sample size (number of plots) for abundance and biomass
+  ss_abun <- as.data.frame(table(data$UNIQUE_ID[!is.na(data$sum.allrawdata.ABUNDANCE)]))
+  ss_bio <- as.data.frame(table(data$UNIQUE_ID[!is.na(data$sum.allrawdata.BIOMASS)]))
+  
+  agg_data <- agg_data %>%
+    mutate(
+      SAMPLE_SIZE_ABUNDANCE = ss_abun$Freq[match(UNIQUE_ID, ss_abun$Var1)],
+      SAMPLE_SIZE_BIOMASS = ss_bio$Freq[match(UNIQUE_ID, ss_bio$Var1)]
+    )
+  
+  # Remove rows where both abundance and biomass are zero or where one is zero and the other is NA
+  agg_data <- agg_data %>%
+    filter(!(sum.allrawdata.ABUNDANCE == 0 & (sum.allrawdata.BIOMASS == 0 | is.na(sum.allrawdata.BIOMASS)))) %>%
+    filter(!(sum.allrawdata.BIOMASS == 0 & (sum.allrawdata.ABUNDANCE == 0 | is.na(sum.allrawdata.ABUNDANCE))))
+  
+  # Define grouping variable based on realm type for % change calculations
+  if (realm_type == "Terrestrial") {
+    agg_data$GROUPING <- paste(agg_data$country, agg_data$BIOME_NAME, agg_data$GENUS, sep = "~")
+  } else if (realm_type == "Marine") {
+    agg_data$GROUPING <- paste(agg_data$marine_ecoregion, agg_data$GENUS, sep = "~")
+  }
+  
+  # Sort data by GROUPING and YEAR for % change calculations
+  agg_data <- agg_data %>%
+    arrange(GROUPING, YEAR)
+  
+  # Calculate the % change in abundance and biomass
+  agg_data <- agg_data %>%
+    group_by(GROUPING) %>%
+    mutate(
+      pct_change_abundance = (sum.allrawdata.ABUNDANCE - lag(sum.allrawdata.ABUNDANCE)) / lag(sum.allrawdata.ABUNDANCE) * 100,
+      pct_change_biomass = (sum.allrawdata.BIOMASS - lag(sum.allrawdata.BIOMASS)) / lag(sum.allrawdata.BIOMASS) * 100
+    ) %>%
+    ungroup()
+  
+  return(agg_data)
+}
+
+# Process the terrestrial and marine data separately
+terrestrial_data <- process_realm_data(terrestrial_data_biome, "Terrestrial")
+marine_data <- process_realm_data(marine_data_with_ecoregions, "Marine")
+
+# Merge terrestrial and marine datasets into a single dataset
+combined_agg <- bind_rows(terrestrial_data, marine_data)
+
+# View the final combined dataset with REALM, country, biome, and genus included
+head(combined_agg)
+
+```
+
+
+
+
+```{r}
+saveRDS(combined_agg, here::here("output/temporary_output/dataset_percent_change_biome_genus.rds"))
+
+```
+

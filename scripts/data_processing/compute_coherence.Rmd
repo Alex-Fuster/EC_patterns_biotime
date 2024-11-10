@@ -1,0 +1,298 @@
+---
+title: "R Notebook"
+---
+
+
+# compute correlation matrices
+
+The function to calculate correlations does the following:
+
+- Filter species: Retains only species with at least 9 years of percent change data for either abundance or biomass.
+
+- Initialize matrices: Creates two matrices, one for storing correlation values (corr_matrix) and one for storing the correlation type (type_matrix), for all pairs of species in the study.
+
+- Loop through species pairs:
+  For each pair of species, identifies common years for comparison.
+  Extracts percent change vectors for both abundance and biomass for the overlapping years.
+
+- Priority check:
+  If both species have abundance data, computes the correlation for abundance changes.
+  If both species only have biomass data, computes the correlation for biomass changes.
+  If one species has abundance and the other has biomass, computes a mixed correlation.
+
+- Store results: Saves the correlation value and the type (abundance, biomass, or mixed) in the matrices.
+- Symmetry: Ensures the correlation matrix is symmetric by filling both upper and lower triangle values.
+
+
+```{r}
+library(dplyr)
+library(sf)
+library(ggplot2)
+library(reshape2)
+library(gridExtra)
+library(tidyverse)
+library(RColorBrewer)
+library(ggplot2)
+library(reshape2)
+library(ggpubr)
+#dataset_percent_change <- readRDS(here::here("processed_data/dataset_percent_change.rds"))
+dataset_percent_change <- readRDS(here::here("output/temporary_output/dataset_percent_change_biome_genus.rds"))
+
+```
+
+
+
+# GENUS LEVEL + BIOME
+
+
+```{r}
+
+compute_correlations_biome <- function(data) {
+  # Filter genera with at least 9 years of percent change in abundance or biomass
+  filtered_data <- data %>%
+    filter(!is.na(pct_change_abundance) | !is.na(pct_change_biomass)) %>%
+    group_by(GENUS) %>%
+    filter(n_distinct(YEAR) >= 6) %>%
+    ungroup()
+
+  # Check if there are at least two genera with sufficient data
+  genera <- unique(filtered_data$GENUS)
+  n_genera <- length(genera)
+  if (n_genera < 2) {
+    message("Not enough genera with sufficient data for correlation computation.")
+    return(list(correlation = matrix(NA, n_genera, n_genera), type = matrix(NA, n_genera, n_genera)))
+  }
+
+  # Initialize correlation and type matrices
+  corr_matrix <- matrix(NA, n_genera, n_genera)
+  type_matrix <- matrix(NA, n_genera, n_genera)
+  rownames(corr_matrix) <- genera
+  colnames(corr_matrix) <- genera
+  rownames(type_matrix) <- genera
+  colnames(type_matrix) <- genera
+
+  # Loop over genera pairs and compute correlations
+  for (i in 1:(n_genera - 1)) {
+    for (j in (i + 1):n_genera) {
+      genus_i <- filtered_data %>% filter(GENUS == genera[i])
+      genus_j <- filtered_data %>% filter(GENUS == genera[j])
+
+      # Find overlapping years
+      common_years <- intersect(genus_i$YEAR, genus_j$YEAR)
+
+      # Ensure there are enough overlapping years for correlation
+      if (length(common_years) < 2) {
+        next  # Skip to the next pair if there are not enough overlapping years
+      }
+
+      # Extract percent change vectors for common years
+      vec_i_abundance <- genus_i %>%
+        filter(YEAR %in% common_years) %>%
+        pull(pct_change_abundance)
+      vec_i_biomass <- genus_i %>%
+        filter(YEAR %in% common_years) %>%
+        pull(pct_change_biomass)
+      
+      vec_j_abundance <- genus_j %>%
+        filter(YEAR %in% common_years) %>%
+        pull(pct_change_abundance)
+      vec_j_biomass <- genus_j %>%
+        filter(YEAR %in% common_years) %>%
+        pull(pct_change_biomass)
+
+      # Check if abundance is available for both genera and if vectors match in length
+      if (!all(is.na(vec_i_abundance)) & !all(is.na(vec_j_abundance)) & length(vec_i_abundance) == length(vec_j_abundance)) {
+        corr_matrix[i, j] <- cor(vec_i_abundance, vec_j_abundance, use = "complete.obs")
+        type_matrix[i, j] <- "abundance"
+      } else if (!all(is.na(vec_i_biomass)) & !all(is.na(vec_j_biomass)) & length(vec_i_biomass) == length(vec_j_biomass)) {
+        corr_matrix[i, j] <- cor(vec_i_biomass, vec_j_biomass, use = "complete.obs")
+        type_matrix[i, j] <- "biomass"
+      } else {
+        # Mixed correlation: one has abundance, the other has biomass
+        if (!all(is.na(vec_i_abundance)) & !all(is.na(vec_j_biomass)) & length(vec_i_abundance) == length(vec_j_biomass)) {
+          corr_matrix[i, j] <- cor(vec_i_abundance, vec_j_biomass, use = "complete.obs")
+          type_matrix[i, j] <- "mixed"
+        } else if (!all(is.na(vec_i_biomass)) & !all(is.na(vec_j_abundance)) & length(vec_i_biomass) == length(vec_j_abundance)) {
+          corr_matrix[i, j] <- cor(vec_i_biomass, vec_j_abundance, use = "complete.obs")
+          type_matrix[i, j] <- "mixed"
+        }
+      }
+
+      # Fill the symmetric values
+      corr_matrix[j, i] <- corr_matrix[i, j]
+      type_matrix[j, i] <- type_matrix[i, j]
+    }
+  }
+
+  return(list(correlation = corr_matrix, type = type_matrix))
+}
+
+
+```
+
+```{r}
+# Define the function to compute coherence matrices based on grouping criteria
+compute_correlations_by_realm <- function(data, realm) {
+  
+  if (realm == "Terrestrial") {
+    # Group by country and biome for terrestrial
+    group_cols <- c("country", "BIOME_NAME")
+  } else if (realm == "Marine") {
+    # Group by biome only for marine
+    group_cols <- c("marine_ecoregion")
+  } else {
+    stop("Invalid realm specified.")
+  }
+  
+  # Define a list to store results
+  realm_correlations <- list()
+  
+  # Loop through each unique combination in the grouping columns
+  unique_combinations <- data %>%
+    distinct(across(all_of(group_cols))) %>%
+    drop_na()
+  
+  for (i in 1:nrow(unique_combinations)) {
+    # Filter data for the specific combination
+    specific_data <- data
+    for (col in group_cols) {
+      specific_data <- specific_data %>% filter(.data[[col]] == unique_combinations[[col]][i])
+    }
+    
+    # Check if there's data for this combination
+    if (nrow(specific_data) > 0) {
+      # Compute correlations
+      correlation_result <- compute_correlations_biome(specific_data)
+      key <- paste(unique_combinations[i, , drop = TRUE], collapse = "_")
+      realm_correlations[[key]] <- correlation_result
+    }
+  }
+  
+  return(realm_correlations)
+}
+
+# Split the data by realm
+terrestrial_data <- dataset_percent_change %>% filter(REALM == "Terrestrial")
+marine_data <- dataset_percent_change %>% filter(REALM == "Marine")
+
+# Compute coherence matrices for terrestrial and marine realms
+terrestrial_correlations <- compute_correlations_by_realm(terrestrial_data, "Terrestrial")
+marine_correlations <- compute_correlations_by_realm(marine_data, "Marine")
+
+```
+
+
+
+
+# Plot EC patterns
+
+```{r}
+# Function to create a correlation matrix plot
+plot_correlation_matrix <- function(correlation_matrix, title) {
+  # Convert the matrix to long format for ggplot
+  data_matrix <- melt(correlation_matrix, na.rm = TRUE)
+  colnames(data_matrix) <- c("x", "y", "value")
+  
+  # Plot matrix with color scale
+  palette <- RColorBrewer::brewer.pal(n = 11, name = "RdBu")
+  ggplot(data_matrix, aes(x = x, y = y, fill = value)) +
+    geom_raster() +
+    scale_fill_gradientn(colors = rev(palette), limits = c(-1, 1), name = "Correlation") +
+    labs(x = NULL, y = NULL, title = title) +
+    theme_classic() +
+    theme(
+      legend.position = "right",
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+      axis.line = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    coord_fixed()
+}
+
+# Function to create a distribution plot of correlation values
+plot_distribution <- function(correlation_matrix, title) {
+  # Extract correlation values and remove NAs
+  cor_values <- correlation_matrix[lower.tri(correlation_matrix, diag = FALSE)]
+  cor_values <- cor_values[!is.na(cor_values)]
+  
+  # Bin the correlation values
+  data_new <- data.frame(correlation = cor_values) %>%
+    dplyr::mutate(cor_bin = cut(correlation, breaks = seq(-0.9, 0.9, by = 0.1), include.lowest = TRUE)) %>%
+    dplyr::group_by(cor_bin) %>%
+    dplyr::summarize(frequency = n()) %>%
+    dplyr::mutate(cor_bin_mid = (as.numeric(sub("\\[(.+),.+\\)", "\\1", cor_bin)) + 
+                                 as.numeric(sub(".+,(.+)\\)", "\\1", cor_bin))) / 2)
+  
+  # Plot distribution with standardized color scale
+  ggplot(data_new, aes(x = cor_bin, y = frequency, fill = cor_bin_mid)) +
+    geom_bar(stat = "identity") +
+    scale_fill_distiller(palette = "RdBu", limits = c(-0.8, 0.8), direction = -1, name = "Correlation") +
+    labs(x = "Interacting species co-response", y = "Frequency", title = title) +
+    theme_classic() +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(hjust = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+}
+```
+
+
+
+
+```{r}
+# Initialize lists to store the plots for terrestrial and marine assemblages
+terrestrial_matrix_plots <- list()
+terrestrial_distribution_plots <- list()
+marine_matrix_plots <- list()
+marine_distribution_plots <- list()
+
+# Generate terrestrial plots
+for (assemblage_name in names(terrestrial_correlations)) {
+  correlation_data <- terrestrial_correlations[[assemblage_name]]
+  if (!is.null(correlation_data$correlation) && nrow(correlation_data$correlation) > 0) {
+    # Create matrix plot and distribution plot
+    terrestrial_matrix_plots[[assemblage_name]] <- plot_correlation_matrix(
+      correlation_data$correlation, title = paste("Terrestrial:", assemblage_name)
+    )
+    terrestrial_distribution_plots[[assemblage_name]] <- plot_distribution(
+      correlation_data$correlation, title = paste("Terrestrial:", assemblage_name)
+    )
+  }
+}
+
+# Generate marine plots
+for (assemblage_name in names(marine_correlations)) {
+  correlation_data <- marine_correlations[[assemblage_name]]
+  if (!is.null(correlation_data$correlation) && nrow(correlation_data$correlation) > 0) {
+    # Create matrix plot and distribution plot
+    marine_matrix_plots[[assemblage_name]] <- plot_correlation_matrix(
+      correlation_data$correlation, title = paste("Marine:", assemblage_name)
+    )
+    marine_distribution_plots[[assemblage_name]] <- plot_distribution(
+      correlation_data$correlation, title = paste("Marine:", assemblage_name)
+    )
+  }
+}
+
+
+
+
+```
+
+
+
+```{r}
+# Arrange terrestrial matrix plots
+ggarrange(plotlist = terrestrial_matrix_plots, ncol = 3, nrow = 4, common.legend = TRUE)
+# Arrange terrestrial distribution plots
+ggarrange(plotlist = terrestrial_distribution_plots, ncol = 3, nrow = 4, common.legend = TRUE)
+
+# Arrange marine matrix plots
+ggarrange(plotlist = marine_matrix_plots, ncol = 3, nrow = 3, common.legend = TRUE)
+# Arrange marine distribution plots
+ggarrange(plotlist = marine_distribution_plots, ncol = 3, nrow = 3, common.legend = TRUE)
+```
+

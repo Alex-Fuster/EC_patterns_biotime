@@ -1,0 +1,530 @@
+---
+title: "Compute marine ecoregions"
+---
+
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggpubr)
+library(ggplot2)
+library(geosphere)
+library(sf)
+library(igraph)
+library(rnaturalearth)
+# Load world map
+world <- ne_countries(scale = "medium", returnclass = "sf")
+```
+
+```{r}
+# # INPUT FILES #
+biotime.raw <- read.csv(here::here('../BioTIMEQuery_24_06_2021.csv'))
+metadata <- read.csv(here::here('raw_data/BioTIMEMetadata_24_06_2021.csv'))
+data_with_biome <- readRDS(here::here("output/temporary_output/data_with_biomes.rds"))
+marine_data_with_ecoregions <- readRDS(here::here("output/marine_data_with_ecoregions.rds"))
+
+```
+
+
+
+```{r}
+# Step 2: Extract unique terrestrial coordinates
+marine_studies <- metadata %>%
+  filter(REALM == "Marine") %>%
+  pull(STUDY_ID)
+
+unique_coords_marine <- biotime.raw %>%
+  filter(STUDY_ID %in% marine_studies, !is.na(LATITUDE), !is.na(LONGITUDE)) %>%
+  distinct(LATITUDE, LONGITUDE) %>%
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+```
+
+
+
+```{r}
+# marine_data <- data_with_biome %>%
+#   filter(REALM == "Marine")
+```
+
+
+
+```{r}
+
+# Replace 'path_to_shapefile' with the actual path to the downloaded MEOW shapefile
+meow_shapefile <- st_read(here::here("../marine_regions/meow_ecos.shp"))
+
+st_crs(meow_shapefile)
+
+# Load the world map as background
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+
+# Plot the marine ecoregions with distinct colors by `REALM`
+ggplot() +
+  geom_sf(data = world, fill = "gray80", color = "black", size = 0.1) +
+  geom_sf(data = meow_shapefile, aes(fill = REALM), color = NA) +
+  labs(title = "Marine Ecoregions by Realm", fill = "Realm") +
+  theme_minimal()
+```
+
+
+
+```{r}
+# Check and align CRS
+# Confirm the CRS for `marine_data` and `meow_shapefile`
+crs_marine_data <- st_crs(unique_coords_marine)
+crs_meow_shapefile <- st_crs(meow_shapefile)
+
+if (crs_marine_data != crs_meow_shapefile) {
+  marine_data <- st_transform(unique_coords_marine, crs = st_crs(meow_shapefile))
+}
+
+# Perform the spatial join
+marine_data_with_ecoregions <- st_join(unique_coords_marine, meow_shapefile[, c("ECOREGION", "PROVINCE", "REALM")], left = TRUE)
+
+marine_data_with_ecoregions <- marine_data_with_ecoregions |> 
+  rename(marine_ecoregion = REALM)
+
+head(marine_data_with_ecoregions)
+
+```
+
+
+plot coordinates and ecoregions assigned
+
+```{r}
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = marine_data_with_ecoregions, aes(color = marine_ecoregion), size = 1, alpha = 0.7) +
+  labs(title = "Marine Data Points Colored by marine ecoregion",
+       subtitle = "Each point represents a data point colored by its assigned marine ecoregion",
+       color = "Marine ecoregion",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+
+
+# Manual checks to add marine ecoregion to those coordinates without it
+
+
+plotting points without marine ecoregions assigned
+
+```{r}
+# Filter points with missing ecoregion information
+missing_ecoregion_points <- marine_data_with_ecoregions %>%
+  filter(is.na(marine_ecoregion))
+
+# Plot the world map with points that have missing ecoregion information
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = missing_ecoregion_points, color = "red", size = 1, alpha = 0.7) +
+  labs(title = "Marine Data Points Missing Ecoregion Information",
+       subtitle = "Red points indicate missing marine ecoregion assignment",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+
+Plot the first missing point/s
+
+
+```{r}
+# Select a specific point by index (e.g., first point in missing_location_points)
+single_point <- missing_ecoregion_points[1:15, ]
+
+# Plot the selected point on the map
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = single_point, color = "red", size = 3) +
+  labs(title = "Inspecting a Single Point for Country Assignment") +
+  theme_minimal()
+
+```
+
+
+```{r}
+unique(marine_data_with_ecoregions$marine_ecoregion)
+```
+
+
+
+Update the data with verified ecoregion
+
+```{r}
+# Define the range of indices you want to update and the new ecoregion name
+start_index <- 1  # First point to update
+end_index <- 15    # Last point to update
+ecoregion_name <- "Temperate Australasia"  # Verified ecoregion name for these points
+
+# Extract the coordinates of the points in the selected range
+latitudes <- st_coordinates(missing_ecoregion_points[start_index:end_index, ])[,2]
+longitudes <- st_coordinates(missing_ecoregion_points[start_index:end_index, ])[,1]
+
+# Update the `marine_ecoregion` field in `marine_data_with_ecoregions` based on matching coordinates
+marine_data_with_ecoregions <- marine_data_with_ecoregions %>%
+  mutate(
+    marine_ecoregion = if_else(
+      st_coordinates(.)[,2] %in% latitudes & st_coordinates(.)[,1] %in% longitudes,
+      ecoregion_name,
+      marine_ecoregion
+    )
+  )
+
+#saveRDS(marine_data_with_ecoregions, here::here("output/temporary_output/marine_data_with_ecoregions.rds"))
+
+#marine_data_with_ecoregions <- readRDS(here::here("output/temporary_output/marine_data_with_ecoregions.rds"))
+
+
+```
+
+
+```{r}
+# Assign 'Southern Ocean' to points south of 60°S
+marine_data_with_ecoregions <- marine_data_with_ecoregions %>%
+  mutate(
+    marine_ecoregion = if_else(
+      is.na(marine_ecoregion) & st_coordinates(.)[,2] < -60,
+      "Southern Ocean",
+      marine_ecoregion
+    )
+  )
+
+# Filter points south of 60°S
+southern_ocean_points <- marine_data_with_ecoregions1 %>%
+  filter(st_coordinates(geometry)[, 2] < -60)
+
+# Plot the world map with Southern Ocean points
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = southern_ocean_points, color = "blue", size = 1, alpha = 0.7) +
+  labs(title = "Marine Data Points in the Southern Ocean",
+       subtitle = "Points south of 60°S assigned to the Southern Ocean",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+
+```
+
+
+
+------------------------------------------
+
+```{r}
+# Validate geometries
+missing_ecoregion_points <- st_make_valid(missing_ecoregion_points)
+grid_sf <- st_make_valid(grid_sf)
+```
+
+
+# Update marine ecoregion based on grid
+
+```{r}
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +  # Base world map
+  geom_sf(data = marine_data_with_ecoregions, aes(color = marine_ecoregion), size = 1, alpha = 0.7) +  # Marine data points
+  scale_color_viridis_d(name = "Marine Ecoregion", option = "C", na.value = "grey50") +  # Viridis color palette for marine ecoregions
+  labs(
+    title = "Marine Data Points by Marine Ecoregion",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+```
+
+
+
+plotting points without marine ecoregions assigned
+
+```{r}
+# Filter points with missing ecoregion information
+missing_ecoregion_points <- marine_data_with_ecoregions %>%
+  filter(is.na(marine_ecoregion))
+
+# Plot the world map with points that have missing ecoregion information
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = missing_ecoregion_points, color = "red", size = 1, alpha = 0.7) +
+  labs(title = "Marine Data Points Missing Ecoregion Information",
+       subtitle = "Red points indicate missing marine ecoregion assignment",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+
+
+```{r}
+# Define grid parameters (adjust cell size if necessary)
+cell_size <- 10  # Cell size in degrees
+bounding_box <- st_bbox(missing_ecoregion_points)  # Bounding box for missing points
+origin <- c(bounding_box$xmin, bounding_box$ymin)  # Lower-left corner of the grid
+
+# Create the grid
+grid <- st_make_grid(
+  st_as_sfc(bounding_box),
+  cellsize = cell_size,
+  offset = origin,
+  crs = st_crs(missing_ecoregion_points)
+)
+grid_sf <- st_sf(grid_id = 1:length(grid), geometry = grid)
+
+# Define the grid IDs or ranges you want to highlight
+# Example: select grid cells with IDs from 10 to 20 on the x-axis and 5 to 15 on the y-axis
+highlighted_cells <- grid_sf %>%
+  filter(
+    grid_id >= 1 & grid_id <= 36 |  # Example x-range
+    grid_id >= 1 & grid_id <= 4     # Example y-range
+  )
+
+# Plot the map with grid cells and highlight selected cells
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = grid_sf, fill = NA, color = "blue", linetype = "dashed") +  # Outline all grid cells
+  geom_sf(data = highlighted_cells, fill = "yellow", color = "blue", alpha = 0.5) +  # Highlighted cells
+  geom_sf(data = missing_ecoregion_points, color = "red", size = 1, alpha = 0.7) +
+  labs(
+    title = "Marine Data Points Missing Ecoregion Information",
+    subtitle = "Highlighted Grid Cells",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+# Define the cell size for grid cells, in degrees
+cell_size <- 10  # degrees, adjust as needed
+
+# Create the grid based on geographic coordinates
+grid <- st_make_grid(
+  st_as_sfc(st_bbox(missing_ecoregion_points)),
+  cellsize = c(cell_size, cell_size),
+  crs = st_crs(missing_ecoregion_points)
+)
+
+# Convert the grid to an sf object for labeling or further processing
+grid_sf <- st_sf(grid_id = 1:length(grid), geometry = grid)
+
+# Plot the world map with parallels and meridians
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = grid_sf, fill = NA, color = "blue", linetype = "dashed") +  # Plot grid cells
+  geom_sf(data = missing_ecoregion_points, color = "red", size = 1, alpha = 0.7) +
+  coord_sf(expand = FALSE, datum = sf::st_crs(4326)) +  # Keep it in latitude/longitude coordinates
+  scale_x_continuous(breaks = seq(-180, 180, by = cell_size)) +  # Adds meridians at intervals
+  scale_y_continuous(breaks = seq(-90, 90, by = cell_size)) +    # Adds parallels at intervals
+  labs(
+    title = "Marine Data Points with Missing Ecoregion Information",
+    subtitle = "Grid cells based on latitude/longitude",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+
+lon_min <- -180  # Adjust these values based on the plot
+lon_max <- -120
+lat_min <- -30
+lat_max <- 0
+
+# Step 1: Transform grid_sf to a planar projection suitable for centroids
+grid_sf_projected <- st_transform(grid_sf, crs = 3395)  # World Mercator projection
+
+# Step 2: Calculate centroids in the projected CRS
+grid_sf_projected$centroid <- st_centroid(grid_sf_projected$geometry)
+
+# Step 3: Transform centroids back to the original CRS
+grid_sf$centroid <- st_transform(grid_sf_projected$centroid, crs = st_crs(grid_sf))
+
+# Step 4: Extract coordinates from centroids and filter for selected cells
+centroid_coords <- st_coordinates(grid_sf$centroid)
+selected_grid_cells <- grid_sf %>%
+  filter(
+    centroid_coords[,1] >= lon_min &
+    centroid_coords[,1] <= lon_max &
+    centroid_coords[,2] >= lat_min &
+    centroid_coords[,2] <= lat_max
+  )
+
+# Plot with the selected grid cells highlighted in yellow
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = grid_sf, fill = NA, color = "blue", linetype = "dashed") +  # Plot all grid cells
+  geom_sf(data = selected_grid_cells, fill = "yellow", color = "blue", linetype = "dashed") +  # Highlight selected cells in yellow
+  geom_sf(data = missing_ecoregion_points, color = "red", size = 1, alpha = 0.7) +
+  coord_sf(expand = FALSE, datum = sf::st_crs(4326)) +  # Keep it in latitude/longitude coordinates
+  scale_x_continuous(breaks = seq(-180, 180, by = cell_size)) +  # Adds meridians at intervals
+  scale_y_continuous(breaks = seq(-90, 90, by = cell_size)) +    # Adds parallels at intervals
+  labs(
+    title = "Marine Data Points with Missing Ecoregion Information",
+    subtitle = "Selected grid cells highlighted in yellow",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal()
+
+
+```
+```{r}
+unique(marine_data_with_ecoregions$marine_ecoregion)
+```
+
+
+```{r}
+# Filter `missing_ecoregion_points` within these boundaries
+selected_points <- missing_ecoregion_points %>%
+  filter(
+    st_coordinates(.)[,1] >= lon_min & st_coordinates(.)[,1] <= lon_max &
+    st_coordinates(.)[,2] >= lat_min & st_coordinates(.)[,2] <= lat_max
+  )
+
+# Update `marine_ecoregion` for these points to "Southern Ocean" (for example)
+marine_data_with_ecoregions <- marine_data_with_ecoregions %>%
+  mutate(
+    marine_ecoregion = if_else(
+      st_coordinates(.)[,1] >= lon_min & st_coordinates(.)[,1] <= lon_max &
+      st_coordinates(.)[,2] >= lat_min & st_coordinates(.)[,2] <= lat_max,
+      "Eastern Indo-Pacific",
+      marine_ecoregion
+    )
+  )
+
+```
+
+```{r}
+head(marine_data_with_ecoregions)
+
+```
+
+---------------------------
+
+Fine tunning ecoregions
+
+- Temperate Northern Atlantic -> divided into American and European, Mediterranean Sea, and Black Sea
+
+- Western Indo-Pacific and Australasia expanded south, until latitude 60 where the South Sea starts
+
+
+```{r}
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +  # Base world map
+  geom_sf(data = marine_data_with_ecoregions, aes(color = marine_ecoregion), size = 1, alpha = 0.7) +  # Marine data points
+  #scale_color_viridis_d(name = "Marine Ecoregion", option = "turbo", na.value = "grey50") +  # Viridis color palette for marine ecoregions
+  labs(
+    title = "Marine Data Points by Marine Ecoregion",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "right",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+
+#ggsave(here::here("output/marine_ecoregions.png"), height = 10, width = 13)
+
+```
+
+```{r}
+unique(marine_data_with_ecoregions$marine_ecoregion)
+```
+```{r}
+# Define the cell size for grid cells, in degrees
+cell_size <- 10  # degrees, adjust as needed
+
+# Create the grid based on geographic coordinates
+grid <- st_make_grid(
+  st_as_sfc(st_bbox(marine_data_with_ecoregions)),
+  cellsize = c(cell_size, cell_size),
+  crs = st_crs(missing_ecoregion_points)
+)
+
+# Convert the grid to an sf object for labeling or further processing
+grid_sf <- st_sf(grid_id = 1:length(grid), geometry = grid)
+```
+
+
+
+```{r}
+
+lon_min <- -70  # Adjust these values based on the plot
+lon_max <- -40
+lat_min <- 55
+lat_max <- 60
+
+# Step 1: Transform grid_sf to a planar projection suitable for centroids
+grid_sf_projected <- st_transform(grid_sf, crs = 3395)  # World Mercator projection
+
+# Step 2: Calculate centroids in the projected CRS
+grid_sf_projected$centroid <- st_centroid(grid_sf_projected$geometry)
+
+# Step 3: Transform centroids back to the original CRS
+grid_sf$centroid <- st_transform(grid_sf_projected$centroid, crs = st_crs(grid_sf))
+
+# Step 4: Extract coordinates from centroids and filter for selected cells
+centroid_coords <- st_coordinates(grid_sf$centroid)
+selected_grid_cells <- grid_sf %>%
+  filter(
+    centroid_coords[,1] >= lon_min &
+    centroid_coords[,1] <= lon_max &
+    centroid_coords[,2] >= lat_min &
+    centroid_coords[,2] <= lat_max
+  )
+
+# Plot with the selected grid cells highlighted in yellow
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = grid_sf, fill = NA, color = "blue", linetype = "dashed") +  # Plot all grid cells
+  geom_sf(data = selected_grid_cells, fill = "yellow", color = "blue", linetype = "dashed") +  # Highlight selected cells in yellow
+  geom_sf(data = marine_data_with_ecoregions, aes(color = marine_ecoregion), size = 1, alpha = 0.7) +
+  coord_sf(expand = FALSE, datum = sf::st_crs(4326)) +  # Keep it in latitude/longitude coordinates
+  scale_x_continuous(breaks = seq(-180, 180, by = cell_size)) +  # Adds meridians at intervals
+  scale_y_continuous(breaks = seq(-90, 90, by = cell_size)) +    # Adds parallels at intervals
+  labs(
+    title = "Marine Ecoregions and Grid System for Fine Tunning Point Assignment",
+    subtitle = "Selected grid cells highlighted in yellow",
+    x = "Longitude", y = "Latitude"
+  ) +
+  theme_minimal()
+
+#ggsave(here::here("output/temporary_output/grid_system_ecoregion_assingment.png"), height = 10, width = 13)
+
+```
+
+```{r}
+# Filter `missing_ecoregion_points` within these boundaries
+selected_points <- marine_data_with_ecoregions %>%
+  filter(
+    st_coordinates(.)[,1] >= lon_min & st_coordinates(.)[,1] <= lon_max &
+    st_coordinates(.)[,2] >= lat_min & st_coordinates(.)[,2] <= lat_max
+  )
+
+# Update `marine_ecoregion` for these points to "Southern Ocean" (for example)
+marine_data_with_ecoregions <- marine_data_with_ecoregions %>%
+  mutate(
+    marine_ecoregion = if_else(
+      st_coordinates(.)[,1] >= lon_min & st_coordinates(.)[,1] <= lon_max &
+      st_coordinates(.)[,2] >= lat_min & st_coordinates(.)[,2] <= lat_max,
+      "Greenland Sea",
+      marine_ecoregion
+    )
+  )
+
+```
+
+
+```{r}
+# Update the ecoregion name
+marine_data_with_ecoregions <- marine_data_with_ecoregions %>%
+  mutate(marine_ecoregion = recode(marine_ecoregion,
+                                   "Arctic" = "Arctic sea"))
+```
+
+```{r}
+#saveRDS(marine_data_with_ecoregions, here::here("output/marine_data_with_ecoregions.rds"))
+```
+

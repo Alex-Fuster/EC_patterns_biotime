@@ -1,0 +1,272 @@
+---
+title: "Compute proportion change and correlation matrix from raw data"
+Authors: AF
+---
+
+
+*INPUT*: raw data
+*PROCESS*: 
+(1) convert 0 for abundance or biomass to NA to not consider it for calculating % change
+(2) compute % change in abundance and biomass
+(3) compute correlation matrix for a single study as an example - ready to make ir for all
+*OUTPUT*:
+
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggpubr)
+library(ggplot2)
+library(reshape2)
+```
+
+# DATA PROCESSING 
+
+
+```{r}
+# # INPUT FILES # #
+biotime.raw <- read.csv(here::here('../BioTIMEQuery_24_06_2021.csv'))
+metadata <- read.csv(here::here('data/prep_biotime/BioTIMEMetadata_24_06_2021.csv'))
+
+biotime_subset <- read.csv(here::here('AF_pilot/processed_data/subset_abundance_only.csv'))
+```
+
+
+- Remove all 0 or NA for biomass or abundance
+- Aggregate the plot level data of species to study level - mean among plots per study
+
+```{r}
+# Step 0: Create a unique species name in the form "species_genus" at the beginning
+biotime.raw$SPECIES_GENUS <- paste(biotime.raw$SPECIES, biotime.raw$GENUS, sep = "_")
+
+# Step 1: Handle potential false 0s in abundance and biomass
+# Replace 0s with NAs if the study didn't record how abundance or biomass was measured
+biotime.raw$sum.allrawdata.ABUNDANCE[which(
+  biotime.raw$STUDY_ID %in% 
+    metadata$STUDY_ID[which(is.na(metadata$ABUNDANCE_TYPE))])] <- NA
+
+biotime.raw$sum.allrawdata.BIOMASS[which(
+  biotime.raw$STUDY_ID %in% 
+    metadata$STUDY_ID[which(is.na(metadata$BIOMASS_TYPE))])] <- NA
+
+# Step 2: Handle missing plot information by replacing NAs in PLOT with a placeholder
+biotime.raw$PLOT[which(is.na(biotime.raw$PLOT))] <- "Was_NA"
+
+
+# Step 3: Create a UNIQUE_ID to aggregate data per study, species_genus, and year across all plots
+biotime.raw$UNIQUE_ID <- paste(biotime.raw$STUDY_ID, biotime.raw$SPECIES_GENUS, biotime.raw$YEAR, sep = "~")
+
+# Step 4: Aggregate both abundance and biomass data by study, species_genus, and year across all plots
+# We aggregate abundance and biomass together and handle NAs automatically
+biotime.agg <- aggregate(cbind(sum.allrawdata.ABUNDANCE, sum.allrawdata.BIOMASS) ~ UNIQUE_ID, 
+                         data = biotime.raw, 
+                         FUN = function(x) if (all(is.na(x))) NA else mean(x, na.rm = TRUE))
+
+# Step 5: Add identifying columns (STUDY_ID, SPECIES_GENUS, YEAR) back into the aggregated dataset
+biotime.agg$STUDY_ID <- biotime.raw$STUDY_ID[match(biotime.agg$UNIQUE_ID, biotime.raw$UNIQUE_ID)]
+biotime.agg$SPECIES_GENUS <- biotime.raw$SPECIES_GENUS[match(biotime.agg$UNIQUE_ID, biotime.raw$UNIQUE_ID)]
+biotime.agg$YEAR <- biotime.raw$YEAR[match(biotime.agg$UNIQUE_ID, biotime.raw$UNIQUE_ID)]
+
+# Step 6: Calculate the sample size (number of plots) that went into calculating the mean for both abundance and biomass
+ss_abun <- as.data.frame(table(biotime.raw$UNIQUE_ID[-which(is.na(biotime.raw$sum.allrawdata.ABUNDANCE))]))
+ss_bio <- as.data.frame(table(biotime.raw$UNIQUE_ID[-which(is.na(biotime.raw$sum.allrawdata.BIOMASS))]))
+
+# Merge sample size information into the aggregated dataset
+biotime.agg$SAMPLE_SIZE_ABUNDANCE <- ss_abun$Freq[match(biotime.agg$UNIQUE_ID, ss_abun$Var1)]
+biotime.agg$SAMPLE_SIZE_BIOMASS <- ss_bio$Freq[match(biotime.agg$UNIQUE_ID, ss_bio$Var1)]
+
+# Step 7: Remove rows where both abundance and biomass are zero, or one is zero and the other is NA
+biotime.agg <- biotime.agg %>%
+  dplyr::filter(!(sum.allrawdata.ABUNDANCE == 0 & (sum.allrawdata.BIOMASS == 0 | is.na(sum.allrawdata.BIOMASS)))) %>%
+  dplyr::filter(!(sum.allrawdata.BIOMASS == 0 & (sum.allrawdata.ABUNDANCE == 0 | is.na(sum.allrawdata.ABUNDANCE))))
+
+# Step 8: Create a new variable for study and species_genus
+biotime.agg$STUDY_SPECIES_GENUS <- paste(biotime.agg$STUDY_ID, biotime.agg$SPECIES_GENUS, sep = "~")
+
+
+head(biotime.agg)
+```
+
+
+
+# compute % change in abundance or biomass
+
+```{r}
+# Step 1: Sort the data by STUDY_SPECIES_GENUS and YEAR
+biotime.agg <- biotime.agg %>%
+  arrange(STUDY_SPECIES_GENUS, YEAR)
+
+# Step 2: Compute the percentage change for abundance and biomass from year t to year t+1
+biotime.agg <- biotime.agg %>%
+  group_by(STUDY_SPECIES_GENUS) %>%  # Group by species_genus within each study
+  mutate(
+    pct_change_abundance = (sum.allrawdata.ABUNDANCE - lag(sum.allrawdata.ABUNDANCE)) / lag(sum.allrawdata.ABUNDANCE) * 100,
+    pct_change_biomass = (sum.allrawdata.BIOMASS - lag(sum.allrawdata.BIOMASS)) / lag(sum.allrawdata.BIOMASS) * 100
+  ) %>%
+  ungroup()  # Ungroup the data after calculation
+
+
+head(biotime.agg)
+```
+
+Check:
+
+```{r}
+# Check if any species has NA for the percentage change in abundance but a valid value for the biomass change:
+# Check for species with NA for abundance change but a valid biomass change
+check_abundance_na_biomass_valid <- biotime.agg %>%
+  filter(is.na(pct_change_abundance) & !is.na(pct_change_biomass))
+
+head(check_abundance_na_biomass_valid)
+```
+
+
+
+# compute correlation matrices
+
+The function to calculate correlations does the following:
+
+- Filter species: Retains only species with at least 9 years of percent change data for either abundance or biomass.
+
+- Initialize matrices: Creates two matrices, one for storing correlation values (corr_matrix) and one for storing the correlation type (type_matrix), for all pairs of species in the study.
+
+- Loop through species pairs:
+  For each pair of species, identifies common years for comparison.
+  Extracts percent change vectors for both abundance and biomass for the overlapping years.
+
+- Priority check:
+  If both species have abundance data, computes the correlation for abundance changes.
+  If both species only have biomass data, computes the correlation for biomass changes.
+  If one species has abundance and the other has biomass, computes a mixed correlation.
+
+- Store results: Saves the correlation value and the type (abundance, biomass, or mixed) in the matrices.
+- Symmetry: Ensures the correlation matrix is symmetric by filling both upper and lower triangle values.
+
+
+```{r}
+# Function to calculate correlations for a given STUDY_ID
+compute_correlations <- function(data) {
+  # Filter species with at least 9 years of percent change in abundance or biomass
+  filtered_data <- data %>%
+    filter(!is.na(pct_change_abundance) | !is.na(pct_change_biomass)) %>%
+    group_by(SPECIES_GENUS) %>%
+    filter(n() >= 9) %>%
+    ungroup()
+
+  # Initialize correlation matrix and type matrix
+  species <- unique(filtered_data$SPECIES_GENUS)
+  n_species <- length(species)
+  corr_matrix <- matrix(NA, n_species, n_species)
+  type_matrix <- matrix(NA, n_species, n_species)
+  rownames(corr_matrix) <- species
+  colnames(corr_matrix) <- species
+  rownames(type_matrix) <- species
+  colnames(type_matrix) <- species
+
+  # Loop over species pairs and compute correlations
+  for (i in 1:(n_species - 1)) {
+    for (j in (i + 1):n_species) {
+      species_i <- filtered_data %>%
+        filter(SPECIES_GENUS == species[i])
+      species_j <- filtered_data %>%
+        filter(SPECIES_GENUS == species[j])
+
+      # Find overlapping years
+      common_years <- intersect(species_i$YEAR, species_j$YEAR)
+
+      # Extract the percent change vectors for common years
+      vec_i_abundance <- species_i %>%
+        filter(YEAR %in% common_years) %>%
+        pull(pct_change_abundance)
+      vec_i_biomass <- species_i %>%
+        filter(YEAR %in% common_years) %>%
+        pull(pct_change_biomass)
+      
+      vec_j_abundance <- species_j %>%
+        filter(YEAR %in% common_years) %>%
+        pull(pct_change_abundance)
+      vec_j_biomass <- species_j %>%
+        filter(YEAR %in% common_years) %>%
+        pull(pct_change_biomass)
+
+      # Check if abundance is available for both species
+      if (!all(is.na(vec_i_abundance)) & !all(is.na(vec_j_abundance))) {
+        # Use abundance for both species
+        corr_matrix[i, j] <- cor(vec_i_abundance, vec_j_abundance, use = "complete.obs")
+        type_matrix[i, j] <- "abundance"
+      } else if (!all(is.na(vec_i_biomass)) & !all(is.na(vec_j_biomass))) {
+        # Use biomass for both species
+        corr_matrix[i, j] <- cor(vec_i_biomass, vec_j_biomass, use = "complete.obs")
+        type_matrix[i, j] <- "biomass"
+      } else {
+        # One species has abundance, the other has biomass (mixed correlation)
+        if (!all(is.na(vec_i_abundance)) & !all(is.na(vec_j_biomass))) {
+          corr_matrix[i, j] <- cor(vec_i_abundance, vec_j_biomass, use = "complete.obs")
+          type_matrix[i, j] <- "mixed"
+        } else if (!all(is.na(vec_i_biomass)) & !all(is.na(vec_j_abundance))) {
+          corr_matrix[i, j] <- cor(vec_i_biomass, vec_j_abundance, use = "complete.obs")
+          type_matrix[i, j] <- "mixed"
+        }
+      }
+
+      # Fill the symmetric values
+      corr_matrix[j, i] <- corr_matrix[i, j]
+      type_matrix[j, i] <- type_matrix[i, j]
+    }
+  }
+
+  return(list(correlation = corr_matrix, type = type_matrix))
+}
+```
+
+- Testing for one study only
+
+```{r}
+# Select a specific STUDY_ID (for example, STUDY_ID = 119)
+specific_study_data <- biotime.agg %>%
+  filter(STUDY_ID == 119)
+
+# Apply the compute_correlations function to this specific study
+correlation_result <- compute_correlations(specific_study_data)
+
+# View the correlation matrix and the type matrix for this specific study
+correlation_matrix <- correlation_result$correlation
+type_matrix <- correlation_result$type
+
+# Display the results
+print("Correlation Matrix:")
+print(correlation_matrix)
+
+print("Type Matrix (Abundance, Biomass, or Mixed):")
+print(type_matrix)
+```
+
+
+Plot of that one matrix
+
+```{r}
+data_matrix <- melt(correlation_matrix, na.rm = TRUE)
+colnames(data_matrix) <- c("x", "y", "value")
+
+# Plot the matrix
+palette <- RColorBrewer::brewer.pal(n = 11, name = "RdBu")
+
+plot_matrix_c <- ggplot(data_matrix, aes(x = x, y = y, fill = value)) +
+  geom_raster() +
+  scale_fill_gradientn(colors = rev(palette), limits = c(-1, 1)) +
+  labs(x = NULL, y = NULL, title = expression("Co-response matrix"~italic("C"))) +
+  theme_classic() +
+  theme(
+    legend.position = "right",
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),  
+    axis.line = element_blank(),   
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  coord_fixed()
+
+# Display the plot
+print(plot_matrix_c)
+```
+

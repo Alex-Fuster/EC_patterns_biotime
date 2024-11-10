@@ -1,0 +1,1132 @@
+---
+title: "R Notebook"
+Authors: "AF"
+---
+
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(ggpubr)
+library(ggplot2)
+library(geosphere)
+library(sf)
+library(igraph)
+library(rnaturalearth)
+# Load world map
+world <- ne_countries(scale = "medium", returnclass = "sf")
+rm(list=ls()) 
+```
+
+
+
+```{r}
+# # INPUT FILES #
+biotime.raw <- read.csv(here::here('../BioTIMEQuery_24_06_2021.csv'))
+metadata <- read.csv(here::here('raw_data/BioTIMEMetadata_24_06_2021.csv'))
+```
+
+
+How many studies have plots data?
+
+```{r}
+# Step 1: Count the number of unique plots per study
+plot_count_by_study <- biotime.raw %>%
+  group_by(STUDY_ID) %>%
+  summarize(number_of_plots = n_distinct(PLOT))
+
+# Step 2: Filter studies with more than one plot
+studies_with_multiple_plots <- plot_count_by_study %>%
+  filter(number_of_plots > 1)
+
+paste(length(studies_with_multiple_plots$STUDY_ID), "studies with >0 plots")
+
+```
+
+how many plots they have?
+
+```{r}
+# Step 3: Plot the number of studies with more than one plot
+ggplot(studies_with_multiple_plots, aes(x = factor(STUDY_ID), y = number_of_plots)) +
+  geom_bar(stat = "identity") +
+  theme_classic() +
+  labs(x = "Study ID", y = "Number of Unique Plots", 
+       title = "Studies with More Than One Plot") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+How many studies with 0 plots?
+
+```{r}
+# Step 1: Identify studies with no plot data (NA or missing)
+studies_with_no_plot_data <- biotime.raw %>%
+  filter(is.na(PLOT) | PLOT == "") %>%
+  distinct(STUDY_ID)
+
+# Step 2: Count the total number of studies with no plot data
+total_studies_with_no_plot_data <- studies_with_no_plot_data %>%
+  summarize(total = n())
+
+# View the result
+total_studies_with_no_plot_data
+```
+
+### N plots and study area
+
+
+```{r}
+# Step 1: Count the number of unique plots per study
+plot_count_by_study <- biotime.raw %>%
+  group_by(STUDY_ID) %>%
+  summarize(number_of_plots = n_distinct(PLOT))
+
+# Step 2: Filter studies with more than one plot
+studies_with_multiple_plots <- plot_count_by_study %>%
+  filter(number_of_plots > 1)
+
+# Step 3: Merge with metadata to get the AREA_SQ_KM for each study
+studies_with_area <- studies_with_multiple_plots %>%
+  left_join(metadata %>% select(STUDY_ID, AREA_SQ_KM), by = "STUDY_ID")
+
+
+# Step 4: Plot the area (x-axis) and number of plots (y-axis)
+ggplot(studies_with_area, aes(x = AREA_SQ_KM, y = number_of_plots)) +
+  geom_point() +
+  theme_classic() +
+  labs(x = "Area (sq km)", y = "Number of Plots", title = "Area vs Number of Plots for Studies with Multiple Plots") +
+  scale_x_log10() +  # Log-scale the x-axis if needed for better visualization
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  #ylim(0,10000)
+```
+
+
+Several studies have Xe-06	sqared kilometers. This is, they have a few meters squared. So something is wrong with this - probably is meant to be e06 and not negative -06?
+
+checking for instance STUDY_ID = 18
+
+```{r}
+metadata[metadata$STUDY_ID == "10", "METHODS"]
+```
+
+
+Size of studies with 0 plots:
+
+```{r}
+studies_with_0_plots <- plot_count_by_study %>%
+  filter(number_of_plots == 1)
+
+# Step 3: Merge with metadata to get the AREA_SQ_KM for each study
+studies_with_area <- studies_with_0_plots %>%
+  left_join(metadata %>% select(STUDY_ID, AREA_SQ_KM), by = "STUDY_ID")
+
+
+# Step 4: Plot the area (x-axis) and number of plots (y-axis)
+ggplot(studies_with_area, aes(x = AREA_SQ_KM, y = number_of_plots)) +
+  geom_point() +
+  theme_classic() +
+  labs(x = "Area (sq km)", y = "Number of Plots", title = "Area vs Number of Plots for Studies with Multiple Plots") +
+  scale_x_log10() +  # Log-scale the x-axis if needed for better visualization
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  #ylim(0,10000)
+```
+
+Many studies have huge areas and only 1 plot
+
+```{r}
+metadata[metadata$STUDY_ID == "71", "METHODS"]
+metadata[metadata$STUDY_ID == "71", "WEB_LINK"]
+```
+Study 71 is zooplankton data of pretty much all the Russian Arctic, but only 1 plot.
+
+But, in the column SAMPLE_DESC, it has the coordinates (e.g. "-33.97_25.03_South_Africa") - we could retrieve spatial locations from here. Also Latitude Longitude columns [!]
+
+
+```{r}
+metadata[metadata$STUDY_ID == "67", "METHODS"]
+
+unique(biotime.raw[biotime.raw$STUDY_ID == "67",]$PLOT)
+```
+
+Study 67 is bird monitoring through 400 wetlands across all South Africa - only 1 plot.
+
+```{r}
+metadata[metadata$STUDY_ID == "68", "WEB_LINK"]
+
+unique(biotime.raw[biotime.raw$STUDY_ID == "68",]$PLOT)
+```
+
+
+```{r}
+# Step 1: Filter rows with missing latitude or longitude
+missing_lat_long <- biotime.raw %>%
+  filter(is.na(LATITUDE) | is.na(LONGITUDE))
+
+# Step 2: Calculate the total rows and percentage of missing latitude and longitude per STUDY_ID
+missing_lat_long_summary <- biotime.raw %>%
+  group_by(STUDY_ID) %>%
+  summarize(
+    total_rows = n(),
+    missing_lat_long_rows = sum(is.na(LATITUDE) | is.na(LONGITUDE)),
+    missing_percentage = (missing_lat_long_rows / total_rows) * 100
+  ) %>%
+  ungroup()
+
+# View the summary
+missing_lat_long_summary
+
+```
+
+Does the number of sampling coordinates increase with the study area?
+
+```{r}
+# Step 1: Count the number of unique latitude-longitude combinations per study
+unique_locations_per_study <- biotime.raw %>%
+  filter(!is.na(LATITUDE) & !is.na(LONGITUDE)) %>%  # Exclude rows without latitude or longitude
+  group_by(STUDY_ID) %>%
+  summarize(unique_locations = n_distinct(paste(LATITUDE, LONGITUDE, sep = "_"))) %>%
+  ungroup()
+
+# Step 2: Merge with metadata to get AREA_SQ_KM and REALM for each study
+study_area_data <- unique_locations_per_study %>%
+  left_join(metadata %>% select(STUDY_ID, AREA_SQ_KM, REALM), by = "STUDY_ID")
+
+# Step 3: Create separate plots for each realm
+
+# Plot for Terrestrial realm
+plot_terrestrial <- study_area_data %>%
+  filter(REALM == "Terrestrial") %>%
+  ggplot(aes(x = AREA_SQ_KM, y = unique_locations)) +
+  geom_point() +
+  theme_classic() +
+  labs(x = "Area (sq km)", y = "Number of Unique Locations",
+       title = "Terrestrial Realm") +
+  scale_x_log10() +  # Log-scale for area if needed
+  scale_y_continuous()  # Allow specific y-axis scaling
+
+# Plot for Marine realm
+plot_marine <- study_area_data %>%
+  filter(REALM == "Marine") %>%
+  ggplot(aes(x = AREA_SQ_KM, y = unique_locations)) +
+  geom_point() +
+  theme_classic() +
+  labs(x = "Area (sq km)", y = "Number of Unique Locations",
+       title = "Marine Realm") +
+  scale_x_log10() +  # Log-scale for area if needed
+  scale_y_continuous()  # Allow specific y-axis scaling
+
+# Plot for Freshwater realm
+plot_freshwater <- study_area_data %>%
+  filter(REALM == "Freshwater") %>%
+  ggplot(aes(x = AREA_SQ_KM, y = unique_locations)) +
+  geom_point() +
+  theme_classic() +
+  labs(x = "Area (sq km)", y = "Number of Unique Locations",
+       title = "Freshwater Realm") +
+  scale_x_log10() +  # Log-scale for area if needed
+  scale_y_continuous()  # Allow specific y-axis scaling
+
+# Step 4: Arrange the three plots together
+combined_plot <- ggarrange(plot_terrestrial, plot_marine, plot_freshwater,
+                           ncol = 3, nrow = 1, labels = c("A", "B", "C"))
+
+# Display the combined plot
+combined_plot
+```
+
+**SUMMARY**
+
+Studies can cover huge areas but have only one sampling plot - however, they have multiple coordinates. Sampling coordinates are available for pretty much all data, so we can use these to compute assemblages.
+
+
+
+## ADD COUNTRY INFORMATION TO COORDINATES - TERRESTRIAL
+
+
+Check TERRESTRIAL coordinates
+
+
+```{r}
+
+
+# Step 1: Load world country polygons for country/continent classification
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Step 2: Extract unique terrestrial coordinates
+terrestrial_studies <- metadata %>%
+  filter(REALM == "Terrestrial") %>%
+  pull(STUDY_ID)
+
+unique_coords <- biotime.raw %>%
+  filter(STUDY_ID %in% terrestrial_studies, !is.na(LATITUDE), !is.na(LONGITUDE)) %>%
+  distinct(LATITUDE, LONGITUDE) %>%
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+
+# Step 3: Spatial join to assign each point to a country and continent
+unique_coords <- st_join(unique_coords, world %>% select(continent, name_long), join = st_within)
+
+unique_coords
+
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = unique_coords, color = "red", size = 2) +
+  labs(title = "data coordinates",
+       subtitle = "Red points indicate unique coordinates within the data") +
+  theme_minimal()
+
+```
+
+Some of them have NA for continent or country. We want to use this information to make subsets of the data based on country so that the analysis is doable.
+
+
+In the code below, the  continent and country are added manyally by inspecting where points fall in the world map.
+
+The following chunks are run iteratively: 
+- Chuck 1: check the total coordinates missing country information
+- Chunk 2: plot the first of the coordinates with missing country information.
+- Chunk 3: Plot the suspected country that the point must belong to, to confirm it is indeed in that country.
+- Chunk 4: add the continent and country information for that point manually and update the information to the coordinates' data.
+
+
+Check the total coordinates missing country information:
+
+*Chuck 1*
+
+```{r}
+# Step 1: Filter points with missing continent or country name
+missing_location_points <- unique_coords %>%
+  filter(is.na(continent) | is.na(name_long))
+
+# Step 2: Display the list of points with missing continent or country data
+print("List of points with missing continent or country data:")
+print(missing_location_points)
+
+# Step 3: Plot these points on a world map to visually inspect
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = missing_location_points, color = "red", size = 2) +
+  labs(title = "Points with Missing Continent or Country (name_long)",
+       subtitle = "Red points indicate missing location data") +
+  theme_minimal()
+```
+
+```{r}
+unique_countries <- sort(unique(world$name_long))
+print(unique_countries)
+```
+
+
+*Chuck 2*
+
+Filtering single locations to add manually the continent and name_long
+
+```{r}
+# Choose a specific point to inspect (e.g., the first point)
+single_point <- missing_location_points[1, ]
+
+# Plot the world map with the selected point
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = single_point, color = "red", size = 3) +
+  labs(title = "Location Check for Selected Point",
+       subtitle = "Red point: Check for country assignment") +
+  theme_minimal()
+```
+
+*Chuck 3*
+
+```{r}
+# Specify the suspected country name
+suspected_country <- "Panama"  # Replace with the country you suspect
+
+# Filter the world map to include only the suspected country
+country_map <- world %>%
+  filter(name_long == suspected_country)
+
+# Plot the country with the specific point
+ggplot(data = country_map) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = single_point, color = "red", size = 3) +
+  labs(title = paste("Location Check for", suspected_country),
+       subtitle = "Red point: Selected location for verification") +
+  theme_minimal()
+```
+
+*Chuck 4*
+
+Add back the point to the raw biotime data - one by one
+
+```{r}
+position <- 1
+
+# Define the specific coordinates and new values
+lat <- st_coordinates(missing_location_points[position, ])[2]
+lon <- st_coordinates(missing_location_points[position, ])[1]
+continent <- "North America"
+country <- "Puerto Rico"
+
+# Find and update the row with the specific coordinate
+unique_coords$continent[st_coordinates(unique_coords)[,2] == lat & st_coordinates(unique_coords)[,1] == lon] <- continent
+unique_coords$name_long[st_coordinates(unique_coords)[,2] == lat & st_coordinates(unique_coords)[,1] == lon] <- country
+
+```
+
+
+--------------------------------
+
+After finishing iterating through all points with missing country information, we save the terrestrial coordinates data.
+
+Save processed unique_coords with manually corrected NA for countries
+
+```{r}
+#saveRDS(unique_coords, here::here("processed_data/unique_coords.rds"))
+unique_coords_terrestrial <- readRDS(here::here("processed_data/unique_coords_terrestrial.rds"))
+```
+
+
+Make sure we dont have any missing country (name_long) or continent in the data
+
+```{r}
+unique_coords %>%
+  filter(is.na(continent) | is.na(name_long))
+```
+
+
+# COMPUTE ASSEMBLAGES - TERRESTRIAL
+
+
+## Terrestrial Assemblage Method: Graph-Based Clustering Approach
+
+This method for creating terrestrial assemblages utilizes a graph-based clustering approach that groups points within a 50 km distance threshold on a per-country basis. Below is an overview of how the method works, followed by an assessment of its strengths and limitations for approximating ecological assemblages.
+
+### How the Method Works
+
+1. **Loop Over Each Country**  
+   The method begins by filtering data for each country individually, grouping points by country to localize and manage the clustering scope.
+
+2. **Calculate Pairwise Distances**  
+   For each country, a pairwise distance matrix is computed to measure the distance between each unique pair of coordinates within that country.
+
+3. **Create Adjacency Matrix**  
+   - Using the distance matrix, a binary adjacency matrix is generated.
+   - Entries in the matrix are set to `TRUE` for pairs of points that are within the 50 km distance threshold.
+   - This adjacency matrix represents spatial closeness between points, facilitating further clustering.
+
+4. **Graph Construction**  
+   - A graph is created using the adjacency matrix, where each point is a node, and edges exist between nodes if they are within 50 km of each other.
+   - This graph allows for grouping based on connected components, where each set of interconnected points is identified as a separate assemblage.
+
+5. **Assign Assemblage IDs**  
+   - Each connected component (group of nodes within 50 km) is assigned a unique assemblage ID, which is then appended to the dataset as `assemblage_id_50km`.
+
+6. **Combine Assemblages Across Countries**  
+   - Finally, all assemblages from each country are combined into a single dataset, ready for visualization and further analysis.
+
+### Pros and Cons of This Method
+
+#### Pros
+- **Clear Spatial Boundaries**: By calculating distances and applying a fixed 50 km threshold, this method provides well-defined spatial clusters that approximate ecological assemblages within practical distance limits.
+- **Efficient Grouping**: Operating within individual countries reduces computational load since each adjacency matrix and graph operation processes points for only a single country.
+- **Graph-Based Clustering**: Graph theory enables effective clustering of spatially close points, capturing local assemblages without overextending clusters.
+
+#### Cons
+- **Artificial Country Boundaries**: Points near country borders may be grouped separately, potentially splitting ecologically similar areas across borders.
+- **Rigid Threshold**: The fixed 50 km threshold assumes homogeneity across diverse landscapes, potentially leading to over-grouping or under-grouping points based on local ecological conditions (e.g., mountain ranges or habitat types).
+- **No Overlap or Merging**: The method assigns points to only one cluster, with no adaptability for overlapping ecosystems that may naturally span clusters.
+
+### Applicability for Ecological Assemblages
+
+This approach is effective for studies focused on:
+
+- **Distinct, Localized Assemblages**: Ideal for identifying ecologically meaningful clusters within a reasonable spatial boundary.
+- **Country-Level Precision**: Suitable where national or administrative boundaries align well with ecological study areas.
+
+However, for ecological research in regions with diverse terrain or habitat types, adaptations may be necessary. Incorporating environmental factors or adjusting the threshold distance could provide more realistic ecological clustering. While this method effectively approximates assemblages, adjustments may be required to address specific ecological contexts.
+
+
+
+Test with a single country:
+
+```{r}
+# Filter for points in Canada
+country_of_interest <- "Japan"
+country_coords <- unique_coords %>%
+  filter(name_long == country_of_interest)
+
+# Load world map and filter for Canada only
+world <- ne_countries(scale = "medium", returnclass = "sf")
+canada_map <- world %>% filter(name_long == country_of_interest)
+
+# Plot 1: Unique coordinates in Canada before grouping
+ggplot() +
+  geom_sf(data = canada_map, fill = "gray90", color = "black") +
+  geom_sf(data = country_coords, color = "blue", size = 2) +
+  ggtitle("Unique Coordinates in Canada") +
+  theme_minimal()
+
+# Proceed if enough points to check for grouping
+if (nrow(country_coords) > 1) {
+  
+  # Calculate pairwise distances
+  distance_matrix <- st_distance(country_coords)
+  
+  # Construct adjacency matrix for points within 50 km
+  adj <- matrix(as.numeric(distance_matrix) < 50000, nrow = nrow(distance_matrix))
+  
+  # Build graph from adjacency matrix
+  g <- graph_from_adjacency_matrix(adj, mode = "undirected")
+  
+  # Identify connected components (assemblages)
+  assemblage_ids <- components(g)$membership
+  
+  # Add assemblage IDs to the dataset
+  country_coords <- country_coords %>%
+    mutate(assemblage_id_50km = paste(country_of_interest, assemblage_ids, sep = "_"))
+  
+  # Plot 2: Assemblages after grouping within 50 km
+  ggplot() +
+    geom_sf(data = canada_map, fill = "gray90", color = "black") +
+    geom_sf(data = country_coords, aes(color = assemblage_id_50km), size = 2) +
+    ggtitle("Assemblages in Canada within 100 km") +
+    theme_minimal() +
+    theme(legend.title = element_blank())
+  
+} else {
+  cat("Not enough points in", country_of_interest, "for distance comparison.")
+}
+```
+```{r}
+paste("It grouped the", length(unique(country_coords$geometry)), "unique coordinates in", length(unique(country_coords$assemblage_id_50km)), "assemblages")
+```
+
+
+
+FOR ALL TERRESTRIAL DATA:
+(the script below takes ~20min to run)
+
+```{r}
+# Initialize list to hold assemblage data for each country
+all_assemblages <- list()
+
+# Loop over each unique country in the data
+for (country in unique(unique_coords$name_long)) {
+  
+  # Filter points for the current country
+  country_coords <- unique_coords %>%
+    filter(name_long == country)
+  
+  # Skip countries with fewer than 2 points
+  if (nrow(country_coords) < 2) next
+  
+  # Calculate pairwise distances for points within the country
+  distance_matrix <- st_distance(country_coords)
+  
+  # Create adjacency matrix for points within 100 km
+  adj <- matrix(as.numeric(distance_matrix) < 50000, nrow = nrow(distance_matrix))
+  
+  # Create graph from adjacency matrix and find connected components
+  g <- graph_from_adjacency_matrix(adj, mode = "undirected")
+  assemblage_ids <- components(g)$membership
+  
+  # Assign assemblage IDs to the data for the country
+  country_assemblages <- country_coords %>%
+    mutate(assemblage_id_50km = paste(country, assemblage_ids, sep = "_"))
+  
+  # Append to the list of assemblages
+  all_assemblages[[country]] <- country_assemblages
+}
+
+# Combine all assemblages into a single dataset
+terrestrial_assemblages <- bind_rows(all_assemblages)
+
+# Plot the results to visualize assemblages globally
+ggplot() +
+  geom_sf(data = world, fill = "gray90", color = "black") +
+  geom_sf(data = terrestrial_assemblages, aes(color = assemblage_id_50km), size = 2) +
+  ggtitle("Global Assemblages within 50 km by Country") +
+  theme_minimal() +
+  theme(legend.position = "none")  # Removes the legend for better clarity on the map
+
+```
+
+
+```{r}
+paste(length(unique(unique_coords$geometry)), "unique coordinates grouped to", 
+      length(unique(final_assemblages$assemblage_id_50km)), "assemblajes")
+```
+```{r}
+#saveRDS(terrestrial_assemblages, here::here("processed_data/terrestrial_assemblages.rds"))
+terrestrial_assemblages <- readRDS(here::here("processed_data/terrestrial_assemblages.rds"))
+```
+
+
+
+## ADD COUNTRY INFORMATION TO COORDINATES - MARINE
+
+```{r}
+# Step 1: Load world country polygons for country/continent classification
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Step 2: Extract unique terrestrial coordinates
+marine_studies <- metadata %>%
+  filter(REALM == "Marine") %>%
+  pull(STUDY_ID)
+
+unique_coords_marine <- biotime.raw %>%
+  filter(STUDY_ID %in% marine_studies, !is.na(LATITUDE), !is.na(LONGITUDE)) %>%
+  distinct(LATITUDE, LONGITUDE) %>%
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+
+# Step 3: Spatial join to assign each point to a country and continent
+unique_coords_marine <- st_join(unique_coords_marine, world %>% select(continent, name_long), join = st_within)
+
+unique_coords_marine
+
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = unique_coords_marine, color = "red", size = 1) +
+  labs(title = "data coordinates",
+       subtitle = "Red points indicate unique coordinates within the data") +
+  theme_minimal()
+```
+
+
+
+# COMPUTE ASSEMBLAGES - MARINE
+
+## Marine Assemblage Method: Sequential Buffer-Based Clustering
+
+This method for approximating true assemblages or communities in marine environments employs sequential spatial clustering with buffer zones, focusing on proximity within a distance threshold of 400 km. Below is an explanation of how this method operates, followed by an assessment of its strengths and limitations for assembling ecological communities.
+
+### How the Method Works
+
+1. **Set a Distance Threshold**  
+   A distance threshold of 400 km is defined as the maximum separation between points to be considered part of the same assemblage.
+
+2. **Assign a Sequential ID**  
+   Each unique coordinate (latitude and longitude) is assigned a sequential ID, aiding in tracking points as they are iterated through.
+
+3. **Sequential Buffer-Based Clustering**  
+   - For each point, the method checks if it already belongs to an assemblage. If it does, the point is skipped to avoid reassigning it.
+   - If the point is unassigned, a buffer zone of 400 km is created around it.
+   - All points within this buffer are grouped together as a single assemblage, and they share the same `assemblage_id_400km`.
+
+4. **Repeat for Each Point**  
+   The method sequentially processes each point, assigning assemblage IDs based on the proximity of neighboring points.
+
+5. **Remove Sequential ID**  
+   After clustering, the sequential ID column is dropped to maintain data clarity.
+
+### Pros and Cons of This Method
+
+#### Pros
+- **Memory Efficiency**: By avoiding the creation of a large distance matrix, this method is computationally efficient and less memory-intensive, suitable for datasets with a high number of points.
+- **Adaptability to Different Scales**: Adjusting the buffer radius allows customization for different spatial scales, enabling its use in various ecological contexts, such as broader assemblages in marine or terrestrial environments.
+- **Local Proximity Capture**: This approach effectively groups points within the 400 km threshold without assuming a fixed grid or shape, allowing for flexible assemblage shapes based on local proximity.
+
+#### Cons
+- **Sequential Clustering Limitation**: Since points are clustered sequentially, this can sometimes lead to over- or under-grouping, especially in areas with irregularly spaced points. For example, on a linear coastline, some assemblages might inadvertently stretch beyond 400 km.
+- **Edge Effects**: The method doesn’t account for edge effects, where points on the periphery of an assemblage may be close to points in another but still beyond the threshold. This could lead to adjacent assemblages that ideally would be grouped as one.
+- **Manual Buffer Distance Adjustment**: A uniform distance threshold is applied, which doesn’t adapt to geographic features or environmental barriers that might influence actual ecological community boundaries.
+
+### Applicability for Ecological Assemblages
+
+This approach is particularly suited for spatial analyses in large datasets when:
+
+- **Large Areas or High Point Densities**: The dataset includes extensive spatial coverage or a high number of points, making precise, data-intensive clustering methods infeasible.
+- **Uniform Threshold Relevance**: The study’s ecological context aligns with a uniform threshold, acknowledging that assemblages may overlap or fragment due to natural geographic or environmental variations.
+
+For studies aiming to approximate species assemblages based on geographic proximity, this method offers a pragmatic, scalable solution. However, for more precise clustering that accounts for nuanced spatial relationships, alternative methods (e.g., hierarchical clustering or adaptive spatial clustering) may provide greater accuracy if data size permits.
+
+(the chunk below takes ~10h to run)
+
+```{r}
+# Set the distance threshold (500 km for marine assemblages)
+distance_threshold <- 500000  # in meters
+
+# Step 1: Create a sequential ID for each point
+unique_coords_marine <- unique_coords_marine %>%
+  mutate(seq_id = row_number())
+
+# Initialize empty vector for assemblage IDs
+unique_coords_marine$assemblage_id_500km <- NA
+
+# Step 2: Assign Assemblages Sequentially
+next_assemblage_id <- 1
+for (i in 1:nrow(unique_coords_marine)) {
+  if (!is.na(unique_coords_marine$assemblage_id_500km[i])) next
+  
+  # Create a buffer for the current point
+  current_point <- unique_coords_marine[i, ]
+  buffered_point <- st_buffer(current_point, dist = distance_threshold)
+  
+  # Find all points within the buffer
+  nearby_points <- unique_coords_marine[st_intersects(buffered_point, unique_coords_marine, sparse = FALSE)[1, ], ]
+  
+  # Assign the same assemblage ID to all nearby points
+  unique_coords_marine$assemblage_id_500km[unique_coords_marine$seq_id %in% nearby_points$seq_id] <- next_assemblage_id
+  next_assemblage_id <- next_assemblage_id + 1
+}
+
+# Remove the sequential ID for clarity
+unique_coords_marine <- unique_coords_marine %>% select(-seq_id)
+
+# Step 3: Plot the Assemblages
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+ggplot() +
+  geom_sf(data = world, fill = "gray90", color = "black") +
+  geom_sf(data = unique_coords_marine, aes(color = as.factor(assemblage_id_500km)), size = 2) +
+  ggtitle("Marine Assemblages within 500 km using Sequential Buffering") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+```{r}
+#saveRDS(unique_coords_marine, here::here("processed_data/unique_coords_marine.rds"))
+```
+
+
+
+Check how it worked, zooming fir instance into the east coast of the US:
+
+```{r}
+# Define the bounding box for the east coast of the US
+east_coast_bbox <- st_bbox(c(xmin = -82, xmax = -65, ymin = 24, ymax = 45), crs = st_crs(4326))
+
+# Filter the assemblages within the bounding box
+east_coast_assemblages <- unique_coords_marine %>%
+  st_transform(4326) %>%
+  st_crop(east_coast_bbox)
+
+# Load the map and filter for the US area
+world <- ne_countries(scale = "medium", returnclass = "sf")
+us_map <- world %>% filter(name_long == "United States")
+
+# Plot the filtered east coast assemblages
+ggplot() +
+  geom_sf(data = us_map, fill = "gray90", color = "black") +
+  geom_sf(data = east_coast_assemblages, aes(color = as.factor(assemblage_id_500km)), size = 2) +
+  coord_sf(xlim = c(east_coast_bbox["xmin"], east_coast_bbox["xmax"]), 
+           ylim = c(east_coast_bbox["ymin"], east_coast_bbox["ymax"])) +
+  ggtitle("Marine Assemblages along the East Coast of the US within 500 km") +
+  theme_minimal() +
+  theme(legend.position = "right")  # Hides the legend
+
+```
+
+
+
+# Add assemblage data into biotime.raw dataset
+
+```{r}
+# Step 1: Extract coordinates, then drop geometry for Marine and Terrestrial Assemblages Data
+unique_coords_marine_prep <- unique_coords_marine %>%
+  mutate(
+    LATITUDE = st_coordinates(.)[,2],
+    LONGITUDE = st_coordinates(.)[,1]
+  ) %>%
+  st_drop_geometry() %>%  # Drop geometry for joining
+  select(LATITUDE, LONGITUDE, assemblage_id_500km, continent, name_long) %>%
+  rename(assemblage_id = assemblage_id_500km, country = name_long)
+
+unique_coords_terrestrial_prep <- terrestrial_assemblages %>%
+  mutate(
+    LATITUDE = st_coordinates(.)[,2],
+    LONGITUDE = st_coordinates(.)[,1]
+  ) %>%
+  st_drop_geometry() %>%
+  select(LATITUDE, LONGITUDE, assemblage_id_50km, continent, name_long) %>%
+  rename(assemblage_id = assemblage_id_50km, country = name_long)
+
+# Convert assemblage_id to character in both dataframes to ensure consistency
+unique_coords_marine_prep <- unique_coords_marine_prep %>%
+  mutate(assemblage_id = as.character(assemblage_id))
+
+unique_coords_terrestrial_prep <- unique_coords_terrestrial_prep %>%
+  mutate(assemblage_id = as.character(assemblage_id))
+
+# Combine Marine and Terrestrial Assemblages Data
+all_unique_coords <- bind_rows(unique_coords_marine_prep, unique_coords_terrestrial_prep)
+
+# Add Assemblage Info, Country, and Continent to biotime.raw
+biotime.with_assemblages <- biotime.raw %>%
+  left_join(all_unique_coords, by = c("LATITUDE", "LONGITUDE"))
+
+
+head(biotime.with_assemblages)
+
+```
+
+
+Filter out Freshwater realm
+
+```{r}
+# Add realm information to biotime.with_assemblages
+database_assemblages <- biotime.with_assemblages %>%
+  left_join(metadata %>% select(STUDY_ID, REALM), by = "STUDY_ID")
+
+# Filter out freshwater studies
+database_assemblages <- database_assemblages %>%
+  filter(REALM != "Freshwater")
+
+#saveRDS(database_assemblages, here::here("../database_assemblages.rds"))
+
+```
+
+# ADD BIOME
+
+```{r}
+# Load your datasets
+database_assemblages <- readRDS(here::here("../database_assemblages.rds"))
+eco.regions <- st_read(here::here("../ecoregions/tm_ecoregions_2017.shp"))
+
+database_assemblages <- st_as_sf(database_assemblages, coords = c("LONGITUDE", "LATITUDE"), crs = 4326)
+
+# Reproject both datasets to WGS84 (if not already)
+database_assemblages <- st_transform(database_assemblages, crs = 4326)
+eco.regions <- st_transform(eco.regions, crs = 4326)
+
+# Validate geometries in both datasets to fix any issues
+database_assemblages <- st_make_valid(database_assemblages)
+eco.regions <- st_make_valid(eco.regions)
+
+# Create a small buffer around each point (e.g., 1 km)
+#database_assemblages_buffered <- st_buffer(database_assemblages, dist = 1000)  # 1 km buffer
+
+
+# Perform the spatial join with the buffered points
+data_with_biomes <- st_join(database_assemblages, eco.regions["BIOME_NAME"], left = FALSE)
+
+
+```
+
+```{r}
+#saveRDS(data_with_biome, here::here("output/temporary_output/data_with_biomes.rds"))
+
+data_with_biome <- readRDS(here::here("output/temporary_output/data_with_biomes.rds"))
+
+```
+
+
+
+## Manual checks to add information on country and continent
+
+
+### TERRESTRIAL
+
+```{r}
+terrestrial_data <- data_with_biome %>%
+  filter(REALM == "Terrestrial")
+```
+
+
+
+
+Plot all missing points
+
+```{r}
+# Filter points missing continent or country
+missing_location_points <- terrestrial_data %>%
+  filter(is.na(continent) | is.na(country))
+
+# Print the points missing information
+#print("Points with missing country or continent information:")
+#print(missing_location_points)
+
+```
+
+
+```{r}
+
+# Plot all missing points to inspect locations on a world map
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = missing_location_points, color = "red", size = 2) +
+  labs(title = "Points with Missing Country or Continent Information") +
+  theme_minimal()
+```
+
+
+Plot the first missing point/s
+
+
+```{r}
+# Select a specific point by index (e.g., first point in missing_location_points)
+single_point <- missing_location_points[1:44069, ]
+
+# Plot the selected point on the map
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = single_point, color = "red", size = 3) +
+  labs(title = "Inspecting a Single Point for Country Assignment") +
+  theme_minimal()
+
+```
+
+
+Confirm country by plotting the suspected region
+
+```{r}
+# Define suspected country
+suspected_country <- "Denmark"  # Replace with the hypothesized country name
+
+# Filter the map data to focus on the suspected country
+country_map <- world %>%
+  filter(name_long == suspected_country)
+
+# Plot the point within the suspected country's boundaries
+ggplot(data = country_map) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = single_point, color = "red", size = 3) +
+  labs(title = paste("Verifying Point Location in", suspected_country)) +
+  theme_minimal()
+
+```
+
+
+Update the data with verified country
+
+```{r}
+# Example for updating a point’s information
+index <- 1  # Position of the point you verified
+latitude <- st_coordinates(missing_location_points[index, ])[2]
+longitude <- st_coordinates(missing_location_points[index, ])[1]
+continent_name <- "Peru"
+country_name <- "South America"  # Update with verified country
+
+# Update the main data frame with verified continent and country
+data_with_biome <- data_with_biome %>%
+  mutate(
+    continent = if_else(st_coordinates(.)[,2] == latitude & st_coordinates(.)[,1] == longitude, continent_name, continent),
+    country = if_else(st_coordinates(.)[,2] == latitude & st_coordinates(.)[,1] == longitude, country_name, country)
+  )
+
+```
+
+
+
+for multiple points
+
+```{r}
+# Define the range of indices you want to update and the new values for continent and country
+start_index <- 1
+end_index <- 44069
+continent_name <- "Europe"
+country_name <- "Denmark"
+
+# Extract the coordinates of the points to be updated
+latitudes <- st_coordinates(missing_location_points[start_index:end_index, ])[,2]
+longitudes <- st_coordinates(missing_location_points[start_index:end_index, ])[,1]
+
+# Update the continent and country for these specific points in data_with_biome
+data_with_biome <- data_with_biome %>%
+  mutate(
+    continent = if_else(
+      st_coordinates(.)[,2] %in% latitudes & st_coordinates(.)[,1] %in% longitudes,
+      continent_name, 
+      continent
+    ),
+    country = if_else(
+      st_coordinates(.)[,2] %in% latitudes & st_coordinates(.)[,1] %in% longitudes,
+      country_name, 
+      country
+    )
+  )
+
+# Verify if the updates were applied correctly
+# updated_points <- data_with_biome %>%
+#   filter(continent == continent_name & country == country_name)
+# print(updated_points)
+```
+
+
+
+### MARINE
+
+```{r}
+marine_data <- data_with_biome %>%
+  filter(REALM == "Marine")
+```
+
+```{r}
+#install.packages("devtools")
+# library(devtools)
+# install_github("jebyrnes/meowR")
+
+```
+
+```{r}
+library(sf)
+
+# Replace 'path_to_shapefile' with the actual path to the downloaded MEOW shapefile
+meow_shapefile <- st_read(here::here("../marine_regions/meow_ecos.shp"))
+
+st_crs(meow_shapefile)
+
+# Load the world map as background
+world <- rnaturalearth::ne_countries(scale = "medium", returnclass = "sf")
+
+# Plot the marine ecoregions with distinct colors by `REALM`
+ggplot() +
+  geom_sf(data = world, fill = "gray80", color = "black", size = 0.1) +
+  geom_sf(data = meow_shapefile, aes(fill = REALM), color = NA) +
+  labs(title = "Marine Ecoregions by Realm", fill = "Realm") +
+  theme_minimal()
+
+
+```
+
+
+```{r}
+
+# Check and align CRS
+# Confirm the CRS for `marine_data` and `meow_shapefile`
+crs_marine_data <- st_crs(marine_data)
+crs_meow_shapefile <- st_crs(meow_shapefile)
+
+if (crs_marine_data != crs_meow_shapefile) {
+  marine_data <- st_transform(marine_data, crs = st_crs(meow_shapefile))
+}
+
+# Perform the spatial join
+marine_data_with_ecoregions <- st_join(marine_data, meow_shapefile[, c("ECOREGION", "PROVINCE", "REALM")], left = TRUE)
+
+marine_data_with_ecoregions <- marine_data_with_ecoregions |> 
+  rename(marine_ecoregion = REALM.y)
+
+# Verify the result
+print("Assigned marine ecoregions to marine_data:")
+print(head(marine_data_with_ecoregions))
+
+# Check the unique ecoregions assigned
+unique_ecoregions <- unique(marine_data_with_ecoregions$ECOREGION)
+print("Unique marine ecoregions assigned:")
+print(unique_ecoregions)
+
+```
+
+
+```{r}
+
+# Check and align CRS
+# Confirm the CRS for `marine_data` and `meow_shapefile`
+crs_marine_data <- st_crs(unique_coords_marine)
+crs_meow_shapefile <- st_crs(meow_shapefile)
+
+if (crs_marine_data != crs_meow_shapefile) {
+  marine_data <- st_transform(unique_coords_marine, crs = st_crs(meow_shapefile))
+}
+
+# Perform the spatial join
+marine_data_with_ecoregions2 <- st_join(unique_coords_marine, meow_shapefile[, c("ECOREGION", "PROVINCE", "REALM")], left = TRUE)
+
+marine_data_with_ecoregions <- marine_data_with_ecoregions2 |> 
+  rename(marine_ecoregion = REALM)
+
+```
+
+
+plot coordinates and ecoregions assigned
+
+```{r}
+# Load a world map for context
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Plot the data points colored by ecoregion
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = marine_data_with_ecoregions, aes(color = ECOREGION), size = 1, alpha = 0.7) +
+  labs(title = "Marine Data Points Colored by Ecoregion",
+       subtitle = "Each point represents a data point colored by its assigned ecoregion",
+       color = "Ecoregion",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = marine_data_with_ecoregions, aes(color = marine_ecoregion), size = 1, alpha = 0.7) +
+  labs(title = "Marine Data Points Colored by marine ecoregion",
+       subtitle = "Each point represents a data point colored by its assigned marine ecoregion",
+       color = "Marine ecoregion",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  theme(legend.position = "right")
+```
+
+
+
+
+plotting points without marine ecoregions assigned
+
+```{r}
+# Filter points with missing ecoregion information
+missing_ecoregion_points <- marine_data_with_ecoregions %>%
+  filter(is.na(marine_ecoregion))
+
+# Load a world map for context
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Plot the world map with points that have missing ecoregion information
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = missing_ecoregion_points, color = "red", size = 1, alpha = 0.7) +
+  labs(title = "Marine Data Points Missing Ecoregion Information",
+       subtitle = "Red points indicate missing marine ecoregion assignment",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal()
+```
+
+
+
+Plot the first missing point/s
+
+
+```{r}
+# Select a specific point by index (e.g., first point in missing_location_points)
+single_point <- missing_ecoregion_points[1, ]
+
+# Plot the selected point on the map
+ggplot(data = world) +
+  geom_sf(fill = "gray90", color = "black") +
+  geom_sf(data = single_point, color = "red", size = 3) +
+  labs(title = "Inspecting a Single Point for Country Assignment") +
+  theme_minimal()
+
+```
+
+
+Update the data with verified ecoregion
+
+```{r}
+# Define the range of indices you want to update and the new ecoregion name
+start_index <- 1  # First point to update
+end_index <- 1    # Last point to update
+ecoregion_name <- "Southern Ocean"  # Verified ecoregion name for these points
+
+# Extract the coordinates of the points in the selected range
+latitudes <- st_coordinates(missing_ecoregion_points[start_index:end_index, ])[,2]
+longitudes <- st_coordinates(missing_ecoregion_points[start_index:end_index, ])[,1]
+
+# Update the `marine_ecoregion` field in `marine_data_with_ecoregions` based on matching coordinates
+marine_data_with_ecoregions <- marine_data_with_ecoregions %>%
+  mutate(
+    marine_ecoregion = if_else(
+      st_coordinates(.)[,2] %in% latitudes & st_coordinates(.)[,1] %in% longitudes,
+      ecoregion_name,
+      marine_ecoregion
+    )
+  )
+
+#saveRDS(marine_data_with_ecoregions, here::here("output/temporary_output/marine_data_with_ecoregions.rds"))
+
+#marine_data_with_ecoregions <- readRDS(here::here("output/temporary_output/marine_data_with_ecoregions.rds"))
+
+
+```
+
+
+
